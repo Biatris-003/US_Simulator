@@ -8,10 +8,19 @@ class MetricsWidget(QWidget):
         layout = QVBoxLayout()
         layout.addWidget(QLabel("Quantitative Metrics"))
         
-        self.table = QTableWidget(4, 3)
-        self.table.setHorizontalHeaderLabels(["Metric", "Fundamental", "Harmonic"])
-        self.table.setVerticalHeaderLabels(["Resolution (FWHM)", "Side-Lobes", "CNR", "Improvement"])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        # 4 Rows (Metrics), 2 Columns (Modes)
+        self.table = QTableWidget(4, 2) 
+        self.table.setHorizontalHeaderLabels(["Fundamental", "Harmonic"])
+        
+        self.table.setVerticalHeaderLabels([
+            "Lateral Res (mm)", 
+            "Side-Lobes (dB)", 
+            "CNR", 
+            "SNR"
+        ])
+        
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Stretch)
         self.table.verticalHeader().setSectionResizeMode(QHeaderView.Stretch)
         layout.addWidget(self.table)
         self.setLayout(layout)
@@ -25,26 +34,22 @@ class MetricsWidget(QWidget):
             if color: it.setBackground(color)
             self.table.setItem(r, c, it)
             
-        # Res
-        f_res, h_res = m['fund_fwhm_mm'], m['harm_fwhm_mm']
-        set_item(0, 0, "FWHM (mm)")
-        set_item(0, 1, f"{f_res:.2f}")
-        set_item(0, 2, f"{h_res:.2f}", QColor(200,255,200) if h_res < f_res else None)
+        # 1. Resolution (Lower is better)
+        f_res, h_res = m['fund_fwhm'], m['harm_fwhm']
+        set_item(0, 0, f"{f_res:.2f}")
+        set_item(0, 1, f"{h_res:.2f}", QColor(200,255,200) if h_res < f_res else None)
         
-        # Sidelobes
-        f_sl, h_sl = m['fund_sidelobe_db'], m['harm_sidelobe_db']
-        set_item(1, 0, "Side Lobes (dB)")
-        set_item(1, 1, f"{f_sl:.1f}")
-        set_item(1, 2, f"{h_sl:.1f}", QColor(200,255,200) if h_sl < f_sl else None)
+        # 2. Side Lobes (Lower is better)
+        f_sl, h_sl = m['fund_sl'], m['harm_sl']
+        set_item(1, 0, f"{f_sl:.1f}")
+        set_item(1, 1, f"{h_sl:.1f}", QColor(200,255,200) if h_sl < f_sl else None)
         
-        # CNR
+        # 3. CNR (Higher is better)
         f_cnr, h_cnr = m['fund_cnr'], m['harm_cnr']
-        set_item(2, 0, "CNR")
-        set_item(2, 1, f"{f_cnr:.2f}")
-        set_item(2, 2, f"{h_cnr:.2f}", QColor(200,255,200) if h_cnr > f_cnr else None)
+        set_item(2, 0, f"{f_cnr:.2f}")
+        set_item(2, 1, f"{h_cnr:.2f}", QColor(200,255,200) if h_cnr > f_cnr else None)
         
-        # Improvement
-        imp = ((f_res - h_res)/f_res)*100 if f_res > 0 else 0
-        set_item(3, 0, "Resolution Gain")
-        set_item(3, 1, "-")
-        set_item(3, 2, f"+{imp:.1f}%")
+        # 4. SNR (Higher is better)
+        f_snr, h_snr = m['fund_snr'], m['harm_snr']
+        set_item(3, 0, f"{f_snr:.2f}")
+        set_item(3, 1, f"{h_snr:.2f}", QColor(200,255,200) if h_snr > f_snr else None)
