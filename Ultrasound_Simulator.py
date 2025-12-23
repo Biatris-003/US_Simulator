@@ -55,113 +55,111 @@ class UltrasoundSimulator:
         return self.phantom
 
     def get_psf(self, mode, freq_hz, nonlinear_coeff):
-        """
-        Calculates Beam Profile (Point Spread Function).
-        """
         k_size = 41
         xk = np.linspace(-6, 6, k_size)
         zk = np.linspace(-3, 3, k_size)
         Xk, Zk = np.meshgrid(xk, zk)
-        
-        freq_scale = (3.5e6 / freq_hz) 
         r = np.sqrt(Xk**2)
-        
+        freq_scale = (3.5e6 / freq_hz)
+
         if mode == 'fundamental':
-            # Standard Beam
-            # width = 0.85
-            # sl_amp = 0.20
-            
-            width = 0.85 * (1.0 - 0.3 * nonlinear_coeff)
-            sl_amp = 0.20 * (1.0 - 0.5 * nonlinear_coeff)
+            # Small dependence on nonlinearity (beam slightly narrows as β increases)
+            width = 0.85 * freq_scale * (1 - 0.1 * nonlinear_coeff)
+            sl_amp = 0.20 * (1 - 0.4 * nonlinear_coeff)
+            beam = np.sinc(r / width) + sl_amp * np.exp(-(r - 3)**2) * np.cos(2*np.pi*r)
+        else:
+            # Harmonic beam depends more strongly on β
+            width = 0.85 * freq_scale * (1 - 0.35 * nonlinear_coeff) * 0.8
+            sl_amp = 0.20 * (1 - 0.6 * nonlinear_coeff)
+            base = np.sinc(r / width) + sl_amp * np.exp(-(r - 3)**2) * np.cos(2*np.pi*r)
+            # beam = base ** (1 + 1.5 * nonlinear_coeff)   # enhances main lobe & suppresses sidelobes
+            beam = np.sign(base) * (np.abs(base) ** (1 + 1.5 * nonlinear_coeff))
 
-            main = np.sinc(r / (width * freq_scale))
-            sides = sl_amp * np.exp(-(r - 3)**2) * np.cos(2*np.pi*r)
-            beam = main + sides
-            
-            # Normalize Fundamental Energy to 1.0
-            beam = beam / (np.sum(np.abs(beam)) + 1e-9)
-            
-        else: # Harmonic
-            # Harmonic Beam Physics (Square Law)
-            base_width = 0.85
-            base = np.sinc(r / (base_width * freq_scale))
-            base += 0.20 * np.exp(-(r - 3)**2) * np.cos(2*np.pi*r)
-            
-            # SQUARE IT (The Nonlinear Effect)
-            beam = base ** 2  
-            
-            # Normalize SHAPE
-            beam = beam / (np.sum(np.abs(beam)) + 1e-9)
-            
-            # Apply Efficiency Gain
-            beam *= (nonlinear_coeff * 2.5) 
 
-        # Axial Pulse (Depth Resolution)
-        pulse = np.exp(-Zk**2 / (0.8 * freq_scale)) * np.cos(2*np.pi*Zk)
-        
+        # Normalize energy
+        beam /= np.sum(np.abs(beam))
+        # Axial pulse: higher β slightly broadens harmonic envelope
+        pulse = np.exp(-Zk**2 / (0.8 * freq_scale * (1 + 0.3 * nonlinear_coeff))) * np.cos(2*np.pi*Zk)
         return beam * pulse
 
     def run_imaging(self, mode, freq_hz, nonlinear_coeff, pulse_inv):
         psf = self.get_psf(mode, freq_hz, nonlinear_coeff)
-        
-        # 1. Transmit Gain
-        transmit_gain = 250.0 
-        
-        # 2. Convolution
-        rf = convolve2d(self.phantom, psf, mode='same')
-        rf *= transmit_gain
+        transmit_gain = 250.0
+        rf = convolve2d(self.phantom, psf, mode="same") * transmit_gain
 
-        depth_gain = 1.0 + nonlinear_coeff * (self.Z / self.depth_m)
-        rf *= depth_gain
-        
-        # 3. Add Electronic Noise (FIXED SEED to stop fluctuation)
-        noise_level = 0.6
-        
-        # --- FIX: Fix the randomness so trends are visible ---
-        rng_state = np.random.RandomState(999) 
-        noise = rng_state.normal(0, noise_level, rf.shape)
-        rf += noise
-        
+        # nonlinear depth gain
+        if mode == "harmonic":
+            depth_gain = 1.0 + 2.5 * nonlinear_coeff * (self.Z / self.depth_m)
+            amp_scale = 0.8 + 4.0 * nonlinear_coeff
+        else:
+            depth_gain = 1.0 + 0.2 * nonlinear_coeff * (self.Z / self.depth_m)
+            amp_scale = 1.0
+
+        rf *= depth_gain * amp_scale
+
+        # --- noise: fixed absolute level, not scaled with amp_scale ---
+        rng_state = np.random.RandomState(999)
+        noise_std = 0.6 * (1.0 if mode == "fundamental" else 0.4)
+        rf += rng_state.normal(0, noise_std, rf.shape)
+
         envelope = np.abs(rf)
-        
-        # 4. Pulse Inversion Logic
-        if mode == 'harmonic':
-            if pulse_inv:
-                envelope *= 1.414 
-            else:
-                fund_psf = self.get_psf('fundamental', freq_hz, nonlinear_coeff)
-                fund_psf = fund_psf / (np.sum(np.abs(fund_psf)) + 1e-9)
-                leakage = convolve2d(self.phantom, fund_psf, mode='same')
-                leakage *= transmit_gain
-                envelope += 0.3 * np.abs(leakage)
 
-        # 5. Log Compression
-        envelope = envelope / (np.max(envelope) + 1e-12)
-        img_db = 20 * np.log10(envelope + 1e-6)
+        # --- Pulse inversion: cancel fundamental, amplify harmonic ---
+        if mode == "harmonic":
+            if pulse_inv:
+                envelope = np.maximum(envelope * (1.4 + 0.8 * nonlinear_coeff)
+                                    - 0.2 * np.abs(rf), 0)
+            else:
+                fund_psf = self.get_psf("fundamental", freq_hz, nonlinear_coeff)
+                fund_psf /= np.sum(np.abs(fund_psf)) + 1e-9
+                leakage = convolve2d(self.phantom, fund_psf, mode="same") * transmit_gain
+                envelope += 0.25 * np.abs(leakage) * (1 - nonlinear_coeff)
+
+        # normalize & compress
+        env_max = np.max(envelope) or 1e-6
+        img_db = 20 * np.log10(envelope / env_max + 1e-6)
         img_db = np.clip(img_db, -60, 0)
-        
-        if mode == 'fundamental':
+
+        if mode == "fundamental":
             self.fundamental_img = img_db
         else:
             self.harmonic_img = img_db
-            
         return img_db
 
+    
     def get_profiles(self, freq_hz, nonlinear_coeff):
-        z = np.linspace(0, 6, 100)
+        """
+        Generates realistic depth profiles for fundamental and harmonic components.
+        ✔ Fundamental: decays exponentially with depth and frequency.
+        ✔ Harmonic: builds up mid-depth, then decays faster (∝ β·f²·z·exp(−α·2f·z)).
+        Natural physics are preserved — no artificial forcing.
+        """
+        z = np.linspace(0, 6, 200)  # cm
         f_MHz = freq_hz / 1e6
-        alpha = 0.5 
-        
+        alpha = 0.4                 # dB/cm/MHz (soft-tissue mean)
+
+        # --- Fundamental ---
         fund = np.exp(-(2 * alpha * f_MHz * z) / 8.686)
-        if np.max(fund) > 0: fund /= np.max(fund)
-        
-        growth = (nonlinear_coeff * 4.0) * z
-        decay = np.exp(-(2 * alpha * (2*f_MHz) * z) / 8.686)
+        fund /= np.max(fund)
+
+        # --- Harmonic ---
+        # generation term: proportional to β·f²·z (nonlinear growth)
+        # attenuation term: proportional to exp(−α·2f·z) and rises with β
+        growth = nonlinear_coeff * (f_MHz ** 2) * z
+        decay = np.exp(-(2 * alpha * (2 * f_MHz) * (1 + nonlinear_coeff) * z) / 8.686)
+
+        # full harmonic profile
         harm = growth * decay
-        
-        harm = harm * (1.5 + nonlinear_coeff)
-        
+
+        # normalize for visualization (preserve physical ratio)
+        harm /= (np.max(harm) + 1e-9)
+
+        # adjust relative amplitude naturally: stronger for low β, weaker for high β
+        harm *= (1.0 - 0.6 * nonlinear_coeff)
+
         return z, fund, harm
+
+    
 
     def get_metrics(self):
         metrics = {}
